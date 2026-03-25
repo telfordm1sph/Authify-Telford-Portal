@@ -55,7 +55,7 @@ export default function Sidebar() {
                 {/* ── Sidebar ── */}
                 <aside
                     className={cn(
-                        "fixed md:relative top-0 left-0 z-50 flex flex-col min-h-screen",
+                        "fixed md:relative top-0 left-0 z-50 flex flex-col h-screen",
                         "bg-zinc-950 dark:bg-zinc-950 text-zinc-100",
                         "border-r border-zinc-800/60",
                         "shadow-[4px_0_24px_-4px_rgba(0,0,0,0.4)]",
@@ -125,7 +125,7 @@ export default function Sidebar() {
                     </div>
 
                     {/* ── Navigation ── */}
-                    <div className="flex-1 overflow-y-auto overflow-x-hidden py-3 scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent">
+                    <div className="flex-1 overflow-y-auto overflow-x-hidden py-3 scroll-smooth scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent">
                         <Navigation isSidebarOpen={isSidebarOpen} />
                     </div>
                 </aside>

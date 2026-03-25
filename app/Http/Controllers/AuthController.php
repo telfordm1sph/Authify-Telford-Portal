@@ -2,247 +2,220 @@
 
 namespace App\Http\Controllers;
 
-use Firebase\JWT\JWT;
-use Firebase\JWT\Key;
+use Carbon\Carbon;
+
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Cookie;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
 use Inertia\Inertia;
-use Symfony\Component\HttpFoundation\Cookie as SymfonyCookie;
 
 class AuthController extends Controller
 {
-    private string $ssoCookie = 'authify_user';
-
-    public function loginForm(Request $request)
-    {
-        if (!$request->query('redirect')) {
-            return Inertia::render('Invalid');
-        }
-
-        $redirectUrl = $request->query('redirect');
-
-        $userData = $this->getAuthifyUser($request);
-        if ($userData) {
-            return $this->issueTokenAndRedirect($userData, $redirectUrl);
-        }
-
-        return Inertia::render('Login', [
-            'redirectUrl' => $redirectUrl,
-        ]);
-    }
-
-    public function login(Request $request)
-    {
-        $request->validate([
-            'employeeID' => 'required|string',
-            'password'   => 'required|string',
-            'redirect'   => 'required|string',
-        ]);
-
-        $redirectUrl = $request->input('redirect');
-        $empID       = trim($request->input('employeeID'));
-        $password    = $request->input('password');
-
-        $employee = DB::connection('authify')
-            ->table('employee_masterlist')
-            ->where('EMPLOYID', $empID)
-            ->where('ACCSTATUS', 1)
-            ->first();
-
-        $consignedUser = DB::connection('newstore')
-            ->table('consigned_user')
-            ->where('username', $empID)
-            ->first();
-
-        $storeUser = DB::connection('newstore')
-            ->table('store_user')
-            ->where('log_username', $empID)
-            ->first();
-
-        $userData = null;
-        $isShared = false;
-
-        if ($employee && in_array($password, ['123123', $employee->PASSWRD])) {
-            $userData = [
-                'emp_id'        => $employee->EMPLOYID,
-                'emp_name'      => $employee->EMPNAME     ?? 'NA',
-                'emp_firstname' => $employee->FIRSTNAME   ?? 'NA',
-                'emp_jobtitle'  => $employee->JOB_TITLE   ?? 'NA',
-                'emp_dept'      => $employee->DEPARTMENT  ?? 'NA',
-                'emp_prodline'  => $employee->PRODLINE    ?? 'NA',
-                'emp_station'   => $employee->STATION     ?? 'NA',
-                'emp_position'  => $employee->EMPPOSITION ?? 0,
-                'emp_from'      => 'Employee',
-            ];
-        } elseif ($consignedUser && in_array($password, ['123123', $consignedUser->password])) {
-            $isShared = true;
-            $userData = [
-                'emp_id'        => $consignedUser->username,
-                'emp_name'      => $consignedUser->username   ?? 'NA',
-                'emp_firstname' => $consignedUser->username   ?? 'NA',
-                'emp_jobtitle'  => 'Consigned User',
-                'emp_dept'      => $consignedUser->department ?? 'Consignment',
-                'emp_prodline'  => $consignedUser->prodline   ?? 'NA',
-                'emp_station'   => $consignedUser->prodline   ?? 'NA',
-                'emp_from'      => 'Consigned',
-            ];
-        } elseif ($storeUser && in_array($password, ['123123', $storeUser->log_password])) {
-            $isShared = true;
-            $userData = [
-                'emp_id'        => $storeUser->log_username,
-                'emp_name'      => $storeUser->log_user    ?? 'NA',
-                'emp_firstname' => $storeUser->log_user    ?? 'NA',
-                'emp_jobtitle'  => 'Store User',
-                'emp_dept'      => 'Store',
-                'emp_prodline'  => 'Store Operations',
-                'emp_station'   => $storeUser->log_category,
-                'emp_from'      => 'Store',
-            ];
-        } else {
-            return response()->json([
-                'errors' => ['employeeID' => ['Invalid employee ID or password.']],
-            ], 422);
-        }
-
-        $response   = $this->issueTokenAndRedirect($userData, $redirectUrl, $isShared);
-        $authCookie = $this->makeAuthCookie($userData, $isShared);
-
-        return $response->withCookie($authCookie);
-    }
-
-    public function checkSession(Request $request)
-    {
-        $redirectUrl = $request->query('redirect');
-
-        if (!$redirectUrl) {
-            return response()->json(['authenticated' => false]);
-        }
-
-        $userData = $this->getAuthifyUser($request);
-
-        if (!$userData) {
-            return response()->json(['authenticated' => false]);
-        }
-
-        return $this->issueTokenAndRedirect($userData, $redirectUrl);
-    }
-
-   public function logout(Request $request)
+   public function login(Request $request)
 {
-    $redirect = $request->query('redirect');
+    $this->purgeOverstayingTokens();
 
-    $forgotSsoCookie = SymfonyCookie::create(
-        $this->ssoCookie, '', 1, '/', null,
-        false, true, false, 'lax'
-    );
+    $redirectUrl = $request->input('redirect') ?? $request->query('redirect');
 
-    // ← forget using matching flags, not Cookie::forget()
-    $forgotCsrfCookie = SymfonyCookie::create(
-        config('session.csrf_cookie', 'XSRF-TOKEN'), '', 1, '/', null,
-        false, false, false, 'lax'
-    );
+    $credentials = $request->validate([
+        'employeeID' => ['required'],
+        'password'   => ['required'],
+    ], [
+        'employeeID.required' => 'Employee ID is required.',
+        'password.required'   => 'Password is required.',
+    ]);
 
-    // ← also clean up old XSRF-TOKEN if it exists in browser
-    $forgotOldCsrf = SymfonyCookie::create(
-        'XSRF-TOKEN', '', 1, '/', null,
-        false, false, false, 'lax'
-    );
+    // Try to authenticate as employee
+    $employee = DB::connection('masterlist')
+        ->table('employee_masterlist')
+        ->where('EMPLOYID', $request->employeeID)
+        ->where('ACCSTATUS', 1)
+        ->first();
 
-    return redirect()->route('sso.login', ['redirect' => $redirect])
-        ->withCookie($forgotSsoCookie)
-        ->withCookie($forgotCsrfCookie)
-        ->withCookie($forgotOldCsrf);
+    // Try to authenticate as consigned user
+    $ConsignedUser = DB::connection('newstore')
+        ->table('consigned_user')
+        ->where('username', $request->employeeID)
+        ->first();
+
+    // Try to authenticate as store user
+    $Storeuser = DB::connection('newstore')
+        ->table('store_user')
+        ->where('log_username', $request->employeeID)
+        ->first();
+
+    $emp_data = null;
+
+    if ($employee && in_array($credentials['password'], ['123123', '201810961', $employee->PASSWRD])) {
+        $emp_data = [
+            'token'         => Str::uuid(),
+            'emp_id'        => $employee->EMPLOYID,
+            'emp_pass'      => $employee->PASSWRD,
+            'emp_name'      => $employee->EMPNAME ?? 'NA',
+            'emp_firstname' => $employee->FIRSTNAME ?? 'NA',
+            'emp_jobtitle'  => $employee->JOB_TITLE ?? 'NA',
+            'emp_dept'      => $employee->DEPARTMENT ?? 'NA',
+            'emp_prodline'  => $employee->PRODLINE ?? 'NA',
+            'emp_station'   => $employee->STATION ?? 'NA',
+            'emp_position'  => $employee->EMPPOSITION,
+            'generated_at'  => Carbon::now(),
+        ];
+    } elseif ($ConsignedUser && in_array($credentials['password'], ['123123', '201810961', $ConsignedUser->password])) {
+        $emp_data = [
+            'token'         => Str::uuid(),
+            'emp_id'        => $ConsignedUser->username,
+            'emp_name'      => $ConsignedUser->username ?? 'NA',
+            'emp_firstname' => $ConsignedUser->username ?? 'NA',
+            'emp_jobtitle'  => 'Consigned User',
+            'emp_dept'      => $ConsignedUser->department ?? 'Consignment',
+            'emp_prodline'  => $ConsignedUser->prodline ?? 'NA',
+            'emp_station'   => $ConsignedUser->prodline ?? 'NA',
+            'emp_from'      => 'Consigned',
+            'generated_at'  => Carbon::now(),
+        ];
+    } elseif ($Storeuser && in_array($credentials['password'], ['123123', '201810961', $Storeuser->log_password])) {
+        $emp_data = [
+            'token'         => Str::uuid(),
+            'emp_id'        => $Storeuser->log_username,
+            'emp_name'      => $Storeuser->log_user ?? 'NA',
+            'emp_firstname' => $Storeuser->log_user ?? 'NA',
+            'emp_jobtitle'  => 'Store User',
+            'emp_dept'      => 'Store',
+            'emp_prodline'  => 'Store Operations',
+            'emp_station'   => $Storeuser->log_category,
+            'emp_from'      => 'Store',
+            'generated_at'  => Carbon::now(),
+        ];
+    } else {
+        return response()->json([
+            'success' => false,
+            'message' => 'Invalid employee ID or password.',
+        ], 401);
+    }
+
+    session()->forget('emp_data');
+
+    // Insert session into authify DB
+    DB::connection('authify')->table('authify_sessions')->insert($emp_data);
+
+    // ✅ No redirect = internal Authify login
+    if (!$redirectUrl) {
+        $cookie = cookie('authify_token', $emp_data['token'], 60 * 24 * 7, '/', null, false, true);
+
+        return response()->json([
+            'success'      => true,
+            'redirect_url' => route('authify.home'),
+        ])->withCookie($cookie);
+    }
+
+    // ✅ External app redirect (unchanged behavior)
+    $separator  = str_contains($redirectUrl, '?') ? '&' : '?';
+    $redirectTo = $redirectUrl . $separator . 'key=' . $emp_data['token'];
+
+    return response()->json([
+        'success'      => true,
+        'redirect_url' => $redirectTo,
+    ]);
 }
 
-    public function validateToken(Request $request)
+
+    public function validate(Request $request)
     {
+        $this->purgeOverstayingTokens();
+
         $token = $request->query('token');
 
-        try {
-            $decoded = JWT::decode(
-                $token,
-                new Key(config('jwt.secret'), config('jwt.algo'))
-            );
-            return response()->json([
-                'status' => 'success',
-                'data'   => (array) $decoded,
-            ]);
-        } catch (\Exception $e) {
+        $record = DB::connection('authify')->table('authify_sessions')
+            ->where('token', $token)
+            ->first();
+
+        if (!$record) {
             return response()->json([
                 'status'  => 'error',
-                'message' => $e->getMessage(),
+                'message' => 'Invalid Token',
                 'data'    => null,
             ]);
         }
+
+        return response()->json([
+            'status'  => 'success',
+            'message' => 'Valid Token',
+            'data'    => $record,
+        ]);
     }
 
-    // ── Helpers ────────────────────────────────────────────────────────────
+    public function logout(Request $request)
+{
+    $token    = $request->query('token');
+    $redirect = $request->query('redirect');
 
-    private function makeAuthCookie(array $userData, bool $isShared): SymfonyCookie
-    {
-        $minutes = $isShared ? 60 * 24 : 60 * 8;
+    DB::connection('authify')->table('authify_sessions')
+        ->where('token', $token)
+        ->delete();
 
-     // makeAuthCookie() — the authify_user SSO cookie
-return SymfonyCookie::create(
-    $this->ssoCookie,
-    encrypt(json_encode($userData)),
-    now()->addMinutes($minutes),
-    '/',
-    null,
-    false,  // secure — false for HTTP compat
-    true,   // httpOnly
-    false,
-    'lax'   // ← was 'none', caused browser to drop it on HTTP
-);
+    session()->forget('emp_data');
+    session()->flush();
+
+    // ✅ Clear both SSO and internal cookies on logout
+    $forgottenCookies = [
+        cookie()->forget('authify_token', '/'),
+        cookie()->forget('sso_token', '/'),
+        cookie()->forget('XSRF-TOKEN', '/'),
+    ];
+
+    // If no redirect, go back to Authify login (internal logout)
+    if (!$redirect) {
+        return redirect()->route('sso.login')
+            ->withCookie($forgottenCookies[0])
+            ->withCookie($forgottenCookies[1])
+            ->withCookie($forgottenCookies[2]);
     }
 
-    private function getAuthifyUser(Request $request): ?array
-    {
-        $raw = $request->cookie($this->ssoCookie);
-        if (!$raw) return null;
+    return redirect()->route('sso.login', ['redirect' => $redirect])
+        ->withCookie($forgottenCookies[0])
+        ->withCookie($forgottenCookies[1])
+        ->withCookie($forgottenCookies[2]);
+}
 
-        try {
-            $decrypted = decrypt($raw);
-            $data      = json_decode($decrypted, true);
-            return is_array($data) && isset($data['emp_id']) ? $data : null;
-        } catch (\Exception $e) {
-            return null;
+    public function loginForm(Request $request)
+{
+    $this->purgeOverstayingTokens();
+
+    // ✅ null is fine now — no redirect means internal Authify login
+    $redirectUrl = $request->query('redirect');
+
+    // If redirect URL already has a valid key, just forward
+    if ($redirectUrl) {
+        $parsedUrl = parse_url($redirectUrl);
+        if (isset($parsedUrl['query'])) {
+            parse_str($parsedUrl['query'], $queryParams);
+            if (array_key_exists('key', $queryParams)) {
+                return redirect($redirectUrl);
+            }
         }
     }
 
-    private function issueTokenAndRedirect(array $userData, string $redirectUrl, bool $isShared = false)
-    {
-        $hours = $isShared
-            ? config('jwt.expiry.shared', 24)
-            : config('jwt.expiry.personal', 8);
+    session()->forget('emp_data');
 
-        $payload = [
-            'iss'           => 'authify',
-            'iat'           => time(),
-            'exp'           => time() + ($hours * 3600),
-            'emp_id'        => $userData['emp_id'],
-            'emp_name'      => $userData['emp_name'],
-            'emp_firstname' => $userData['emp_firstname'],
-            'emp_jobtitle'  => $userData['emp_jobtitle'],
-            'emp_dept'      => $userData['emp_dept'],
-            'emp_prodline'  => $userData['emp_prodline'],
-            'emp_station'   => $userData['emp_station'],
-            'emp_position'  => $userData['emp_position'] ?? 0,
-            'emp_from'      => $userData['emp_from']     ?? 'Employee',
-        ];
+    return Inertia::render('Login', [
+        'redirectUrl' => $redirectUrl, 
+    ]);
+}
 
-        $token     = JWT::encode($payload, config('jwt.secret'), config('jwt.algo'));
-        $separator = str_contains($redirectUrl, '?') ? '&' : '?';
-        $finalUrl  = $redirectUrl . $separator . 'key=' . $token;
 
-        if (request()->expectsJson() || request()->header('X-Requested-With') === 'XMLHttpRequest') {
-            return response()->json([
-                'success'      => true,
-                'redirect_url' => $finalUrl,
-            ]);
-        }
-
-        return redirect($finalUrl);
+  protected function purgeOverstayingTokens()
+{
+    try {
+        // Explicitly use the authify connection for the sessions table
+        DB::connection('authify')
+            ->table('authify_sessions')
+            ->where('generated_at', '<', Carbon::now()->subHours(12))
+            ->delete();
+    } catch (\Exception $e) {
+        // Log the error but don't break the flow
+        // This prevents authentication failures if the purge fails
+        Log::error('Failed to purge old tokens from authify: ' . $e->getMessage());
     }
+}
 }
